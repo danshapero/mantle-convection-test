@@ -5,6 +5,7 @@
 #   https://doi.org/10.1029/97JB01353).
 # I took the thermomechanical parts and removed the chemistry.
 
+import argparse
 import numpy as np
 from numpy import pi as π
 try:
@@ -22,18 +23,32 @@ from irksome import Dt
 
 
 # Get command-line options
-options = PETSc.Options()
-output_filename = options.getString("output", "mantle-convection.h5")
-num_cells = options.getInt("num-cells", 32)
-degree = options.getInt("degree", 1)
+parser = argparse.ArgumentParser()
+parser.add_argument("--output-filename", default="mantle.h5")
+parser.add_argument("--log-filename", default="mantle.log")
+parser.add_argument("--solution-method", choices=["split", "monolithic"])
+parser.add_argument("--num-cells", type=int, default=32)
+parser.add_argument("--temperature-degree", type=int, default=1)
+args = parser.parse_args()
 
+solution_method = args.solution_method
+num_cells = args.num_cells
 
-# Make the mesh
+# Make the mesh and some function spaces
 Lx, Ly = Constant(2.0), Constant(1.0)
 num_cells_x = int(float(Lx / Ly)) * num_cells
 mesh = firedrake.RectangleMesh(
     num_cells_x, num_cells, float(Lx), float(Ly), diagonal="crossed"
 )
+
+pressure_space = firedrake.FunctionSpace(mesh, "CG", 1)
+velocity_space = firedrake.VectorFunctionSpace(mesh, "CG", 2)
+temperature_space = firedrake.FunctionSpace(mesh, "CG", args.temperature_degree)
+
+if solution_method == "split":
+    Z = velocity_space * pressure_space
+elif solution_method == "monolithic":
+    Z = velocity_space * pressure_space * temperature_space
 
 
 # Create the initial temperature field; the expression is heinous but if you
@@ -55,90 +70,127 @@ T_u = 0.5 * switch((1 - x[1]) / 2 * sqrt(q / (x[0] + ϵ)))
 T_l = 1 - 0.5 * switch(x[1] / 2 * sqrt(q / (Lx - x[0] + ϵ)))
 T_r = 0.5 + Q / (2 * np.sqrt(π)) * sqrt(q / (x[1] + 1)) * exp(-x[0]**2 * q / (4 * x[1] + 4))
 T_s = 0.5 - Q / (2 * np.sqrt(π)) * sqrt(q / (2 - x[1])) * exp(-(Lx - x[0])**2 * q / (8 - 4 * x[1]))
-expr = T_u + T_l + T_r + T_s - Constant(1.5)
-
-temperature_space = firedrake.FunctionSpace(mesh, "CG", degree)
-T_0 = firedrake.Function(temperature_space).interpolate(clamp(expr, 0, 1))
-T = T_0.copy(deepcopy=True)
+T_expr = T_u + T_l + T_r + T_s - Constant(1.5)
 
 
-# Set up the momentum balance equation
-pressure_space = firedrake.FunctionSpace(mesh, "CG", 1)
-velocity_space = firedrake.VectorFunctionSpace(mesh, "CG", 2)
-Z = velocity_space * pressure_space
+# Create the momentum and energy conservation equations
+if solution_method == "split":
+    z = firedrake.Function(Z)
+    u, p = firedrake.split(z)
+    v, q = firedrake.TestFunctions(Z)
 
-z = firedrake.Function(Z)
-u, p = firedrake.split(z)
+    T = firedrake.Function(temperature_space)
+    φ = firedrake.TestFunction(temperature_space)
+    T.interpolate(clamp(T_expr, 0, 1))
+elif solution_method == "monolithic":
+    z = firedrake.Function(Z)
+    u, p, T = firedrake.split(z)
+    v, q, φ = firedrake.TestFunctions(Z)
+
+    z.sub(2).interpolate(clamp(T_expr, 0, 1))
+
 
 μ = Constant(1)
 def ε(u):
     return sym(grad(u))
 
-v, q = firedrake.TestFunctions(z.function_space())
-
 τ = 2 * μ * ε(u)
 g = firedrake.as_vector((0, -1))
 f = -Ra * T * g
-F = (inner(τ, ε(v)) - q * div(u) - p * div(v) - inner(f, v)) * dx
+F_momentum = (inner(τ, ε(v)) - q * div(u) - p * div(v) - inner(f, v)) * dx
 
-bc = firedrake.DirichletBC(Z.sub(0), Constant((0, 0)), "on_boundary")
+ρ, c, k = Constant(1), Constant(1), Constant(1)
+F_energy = (ρ * c * Dt(T) * ϕ + inner(-ρ * c * T * u + k * grad(T), grad(φ))) * dx
 
+
+# Set up the boundary conditions
+velocity_bc = firedrake.DirichletBC(Z.sub(0), Constant((0, 0)), "on_boundary")
+if solution_method == "split":
+    lower_bc = firedrake.DirichletBC(temperature_space, 1, [3])
+    upper_bc = firedrake.DirichletBC(temperature_space, 0, [4])
+elif solution_method == "monolithic":
+    lower_bc = firedrake.DirichletBC(Z.sub(2), 1, [3])
+    upper_bc = firedrake.DirichletBC(Z.sub(2), 0, [4])
+
+temperature_bcs = [lower_bc, upper_bc]
+
+
+# Set up some solvers
 basis = firedrake.VectorSpaceBasis(constant=True, comm=firedrake.COMM_WORLD)
-nullspace = firedrake.MixedVectorSpaceBasis(Z, [Z.sub(0), basis])
-
-stokes_problem = firedrake.NonlinearVariationalProblem(F, z, bc)
-parameters = {
-    "nullspace": nullspace,
+params = {
     "solver_parameters": {
-        "ksp_type": "preonly",
+        "snes_monitor": ":" + args.log_filename,
+        "ksp_type": "gmres",
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "mumps",
     },
 }
-stokes_solver = firedrake.NonlinearVariationalSolver(stokes_problem, **parameters)
+
+method = irksome.BackwardEuler()
+t = Constant(0.0)
+dt = Constant(1e3)
+
+if solution_method == "split":
+    stokes_problem = firedrake.NonlinearVariationalProblem(F_momentum, z, velocity_bc)
+
+    nullspace = firedrake.MixedVectorSpaceBasis(Z, [Z.sub(0), basis])
+    params["nullspace"] = nullspace
+    stokes_solver = firedrake.NonlinearVariationalSolver(stokes_problem, **params)
+    temperature_solver = irksome.TimeStepper(
+        F_energy, method, t, dt, T, bcs=temperature_bcs
+    )
+elif solution_method == "monolithic":
+    bcs = [velocity_bc] + temperature_bcs
+    F_temp_init = (T - T_expr) * φ * dx
+    F_initial = F_momentum + F_temp_init
+    stokes_problem = firedrake.NonlinearVariationalProblem(F_initial, z, bcs)
+    nullspace = firedrake.MixedVectorSpaceBasis(Z, [Z.sub(0), basis, Z.sub(2)])
+    stokes_solver = firedrake.NonlinearVariationalSolver(
+        stokes_problem, **params, nullspace=nullspace
+    )
+
+    F = F_momentum + F_energy
+    solver = irksome.TimeStepper(
+        F, method, t, dt, z, bcs=bcs, **params, nullspace=[(1, basis)]
+    )
+
 stokes_solver.solve()
 
 
-# Set up the energy balance equation
-ρ, c, k = Constant(1), Constant(1), Constant(1)
+# Pick the timestep based on the cell size and max velocity
 δx = mesh.cell_sizes.dat.data_ro[:].min()
 umax = z.sub(0).dat.data_ro[:].max()
-δt = Constant(δx / umax)
-
-ϕ = firedrake.TestFunction(temperature_space)
-F_convective = -ρ * c * T * inner(u, grad(ϕ)) * dx
-F_diffusive = k * inner(grad(T), grad(ϕ)) * dx
-F = ρ * c * Dt(T) * ϕ * dx + F_convective + F_diffusive
-
-lower_bc = firedrake.DirichletBC(temperature_space, 1, [3])
-upper_bc = firedrake.DirichletBC(temperature_space, 0, [4])
-bcs = [lower_bc, upper_bc]
-
-method = irksome.BackwardEuler()
-temperature_solver = irksome.TimeStepper(F, method, Constant(0.0), δt, T, bcs=bcs)
+dt.assign(δx / umax)
 
 
 # And the timestepping loop.
 final_time = 0.25
-num_steps = int(final_time / float(δt))
+num_steps = int(final_time / float(dt))
 iterator = range(num_steps) if not has_tqdm else tqdm.trange(num_steps)
 
-with firedrake.CheckpointFile(output_filename, "w") as output_file:
+with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     output_file.h5pyfile.attrs["final_time"] = final_time
     output_file.h5pyfile.attrs["num_steps"] = num_steps
 
     output_file.save_mesh(mesh)
 
-    u, p = z.subfunctions
+    if solution_method == "split":
+        u, p = z.subfunctions
+    elif solution_method == "monolithic":
+        u, p, T = z.subfunctions
     output_file.save_function(T, name="temperature", idx=0)
     output_file.save_function(u, name="velocity", idx=0)
     output_file.save_function(p, name="pressure", idx=0)
 
     for step in iterator:
-        temperature_solver.advance()
-        stokes_solver.solve()
+        if solution_method == "split":
+            temperature_solver.advance()
+            stokes_solver.solve()
+            u, p = z.subfunctions
+        elif solution_method == "monolithic":
+            solver.advance()
+            u, p, T = z.subfunctions
 
-        u, p = z.subfunctions
         output_file.save_function(T, name="temperature", idx=step + 1)
         output_file.save_function(u, name="velocity", idx=step + 1)
         output_file.save_function(p, name="pressure", idx=step + 1)
