@@ -113,7 +113,7 @@ if args.temperature_basis == "dg":
 
     θ = π / 4
     α = 1 / 2
-    γ = Constant(2 * degree * (degree - 1) / α**2 / (np.sin(θ) * np.tan(θ / 2)))
+    γ = Constant(2 * degree * (degree + 1) / α**2 / (np.sin(θ) * np.tan(θ / 2)))
 
     u_n = max_value(0, inner(u, n))
     dT_dn = inner(grad(T), n)
