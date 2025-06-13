@@ -170,9 +170,6 @@ num_steps = int(final_time / float(dt))
 iterator = range(num_steps) if not has_tqdm else tqdm.trange(num_steps)
 
 with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
-    output_file.h5pyfile.attrs["final_time"] = final_time
-    output_file.h5pyfile.attrs["num_steps"] = num_steps
-
     output_file.save_mesh(mesh)
 
     if solution_method == "split":
@@ -183,15 +180,21 @@ with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     output_file.save_function(u, name="velocity", idx=0)
     output_file.save_function(p, name="pressure", idx=0)
 
-    for step in iterator:
-        if solution_method == "split":
-            temperature_solver.advance()
-            stokes_solver.solve()
-            u, p = z.subfunctions
-        elif solution_method == "monolithic":
-            solver.advance()
-            u, p, T = z.subfunctions
+    try:
+        for step in iterator:
+            if solution_method == "split":
+                temperature_solver.advance()
+                stokes_solver.solve()
+                u, p = z.subfunctions
+            elif solution_method == "monolithic":
+                solver.advance()
+                u, p, T = z.subfunctions
 
-        output_file.save_function(T, name="temperature", idx=step + 1)
-        output_file.save_function(u, name="velocity", idx=step + 1)
-        output_file.save_function(p, name="pressure", idx=step + 1)
+            output_file.save_function(T, name="temperature", idx=step + 1)
+            output_file.save_function(u, name="velocity", idx=step + 1)
+            output_file.save_function(p, name="pressure", idx=step + 1)
+    except firedrake.ConvergenceError as error:
+        output_file.h5pyfile.attrs["num_steps"] = step
+        print(error)
+    else:
+        output_file.h5pyfile.attrs["num_steps"] = num_steps
