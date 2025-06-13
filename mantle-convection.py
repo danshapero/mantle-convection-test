@@ -16,7 +16,20 @@ except ImportError:
 from petsc4py import PETSc
 import firedrake
 from firedrake import (
-    Constant, sqrt, exp, min_value, max_value, jump, avg, inner, sym, grad, div, dx, dS
+    Constant,
+    sqrt,
+    exp,
+    min_value,
+    max_value,
+    jump,
+    avg,
+    inner,
+    sym,
+    grad,
+    div,
+    dx,
+    ds,
+    dS,
 )
 import irksome
 from irksome import Dt
@@ -78,6 +91,8 @@ def initial_temperature(x):
     T_s = 0.5 - Q / (2 * np.sqrt(π)) * sqrt(q / (2 - x[1])) * exp(-(Lx - x[0])**2 * q / (8 - 4 * x[1]))
     return T_u + T_l + T_r + T_s - Constant(1.5)
 
+T_in = firedrake.Function(temperature_space)
+T_in.interpolate(clamp(initial_temperature(x), 0, 1))
 
 # Create the momentum and energy conservation equations
 if solution_method == "split":
@@ -87,13 +102,13 @@ if solution_method == "split":
 
     T = firedrake.Function(temperature_space)
     φ = firedrake.TestFunction(temperature_space)
-    T.interpolate(clamp(initial_temperature(x), 0, 1))
+    T.assign(T_in)
 elif solution_method == "monolithic":
     z = firedrake.Function(Z)
     u, p, T = firedrake.split(z)
     v, q, φ = firedrake.TestFunctions(Z)
 
-    z.sub(2).interpolate(clamp(initial_temperature(x), 0, 1))
+    z.sub(2).assign(T_in)
 
 
 μ = Constant(1)
@@ -116,13 +131,28 @@ if args.temperature_basis == "dg":
     γ = Constant(2 * degree * (degree + 1) / α**2 / (np.sin(θ) * np.tan(θ / 2)))
 
     u_n = max_value(0, inner(u, n))
+    G_conv_facet_flux = ρ * c * jump(T * u_n) * jump(φ) * dS
+    G_conv_influx = ρ * c * T_in * min_value(0, inner(u, n)) * φ * ds
+    G_conv_outflux = ρ * c * T * u_n * φ * ds
+
     dT_dn = inner(grad(T), n)
     dφ_dn = inner(grad(φ), n)
-    G_advective_flux = ρ * c * jump(T * u_n) * jump(φ) * dS
-    G_diffusive_flux = -k * (jump(dT_dn) * jump(φ) + jump(T) * jump(dφ_dn)) * dS
-    G_diffusive_penalty = k * γ / avg(h) * jump(T) * jump(φ) * dS
+    G_diff_facet_flux = -k * (jump(dT_dn) * jump(φ) + jump(T) * jump(dφ_dn)) * dS
+    G_diff_facet_penalty = k * γ / avg(h) * jump(T) * jump(φ) * dS
+    G_diff_boundary_flux = -k * (dT_dn * φ + T * dφ_dn) * ds
+    G_diff_boundary_penalty = k * γ / h * T * φ * ds
+    G_diff_boundary_forcing = k * T_in * (dφ_dn - γ / h * φ) * ds((3, 4))
 
-    F_energy += G_advective_flux + G_diffusive_flux + G_diffusive_penalty
+    F_energy += (
+        G_conv_facet_flux
+        #+ G_conv_influx
+        #+ G_conv_outflux
+        + G_diff_facet_flux
+        + G_diff_facet_penalty
+        + G_diff_boundary_flux
+        + G_diff_boundary_forcing
+        + G_diff_boundary_penalty
+    )
 
 
 # Set up the boundary conditions
@@ -163,7 +193,7 @@ if solution_method == "split":
     )
 elif solution_method == "monolithic":
     bcs = [velocity_bc] + temperature_bcs
-    F_temp_init = (T - T_expr) * φ * dx
+    F_temp_init = (T - T_in) * φ * dx
     F_initial = F_momentum + F_temp_init
     stokes_problem = firedrake.NonlinearVariationalProblem(F_initial, z, bcs)
     nullspace = firedrake.MixedVectorSpaceBasis(Z, [Z.sub(0), basis, Z.sub(2)])
