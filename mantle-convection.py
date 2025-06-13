@@ -16,7 +16,7 @@ except ImportError:
 from petsc4py import PETSc
 import firedrake
 from firedrake import (
-    Constant, sqrt, exp, min_value, max_value, inner, sym, grad, div, dx
+    Constant, sqrt, exp, min_value, max_value, jump, avg, inner, sym, grad, div, dx, dS
 )
 import irksome
 from irksome import Dt
@@ -28,6 +28,7 @@ parser.add_argument("--output-filename", default="mantle.h5")
 parser.add_argument("--log-filename", default="mantle.log")
 parser.add_argument("--solution-method", choices=["split", "monolithic"])
 parser.add_argument("--num-cells", type=int, default=32)
+parser.add_argument("--temperature-basis", choices=["cg", "dg"])
 parser.add_argument("--temperature-degree", type=int, default=1)
 parser.add_argument("--cfl-fraction", type=float, default=1.0)
 parser.add_argument("--final-time", type=float, default=0.25)
@@ -35,6 +36,8 @@ args = parser.parse_args()
 
 solution_method = args.solution_method
 num_cells = args.num_cells
+basis = args.temperature_basis.upper()
+degree = args.temperature_degree
 
 # Make the mesh and some function spaces
 Lx, Ly = Constant(2.0), Constant(1.0)
@@ -45,7 +48,8 @@ mesh = firedrake.RectangleMesh(
 
 pressure_space = firedrake.FunctionSpace(mesh, "CG", 1)
 velocity_space = firedrake.VectorFunctionSpace(mesh, "CG", 2)
-temperature_space = firedrake.FunctionSpace(mesh, "CG", args.temperature_degree)
+element = firedrake.FiniteElement(basis, "triangle", degree)
+temperature_space = firedrake.FunctionSpace(mesh, element)
 
 if solution_method == "split":
     Z = velocity_space * pressure_space
@@ -103,6 +107,22 @@ F_momentum = (inner(τ, ε(v)) - q * div(u) - p * div(v) - inner(f, v)) * dx
 
 ρ, c, k = Constant(1), Constant(1), Constant(1)
 F_energy = (ρ * c * Dt(T) * ϕ + inner(-ρ * c * T * u + k * grad(T), grad(φ))) * dx
+if args.temperature_basis == "dg":
+    n = firedrake.FacetNormal(mesh)
+    h = firedrake.CellSize(mesh)
+
+    θ = π / 4
+    α = 1 / 2
+    γ = Constant(2 * degree * (degree - 1) / α**2 / (np.sin(θ) * np.tan(θ / 2)))
+
+    u_n = max_value(0, inner(u, n))
+    dT_dn = inner(grad(T), n)
+    dφ_dn = inner(grad(φ), n)
+    G_advective_flux = ρ * c * jump(T * u_n) * jump(φ) * dS
+    G_diffusive_flux = -k * (jump(dT_dn) * jump(φ) + jump(T) * jump(dφ_dn)) * dS
+    G_diffusive_penalty = k * γ / avg(h) * jump(T) * jump(φ) * dS
+
+    F_energy += G_advective_flux + G_diffusive_flux + G_diffusive_penalty
 
 
 # Set up the boundary conditions
