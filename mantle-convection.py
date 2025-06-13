@@ -30,6 +30,7 @@ parser.add_argument("--solution-method", choices=["split", "monolithic"])
 parser.add_argument("--num-cells", type=int, default=32)
 parser.add_argument("--temperature-degree", type=int, default=1)
 parser.add_argument("--cfl-fraction", type=float, default=1.0)
+parser.add_argument("--final-time", type=float, default=0.25)
 args = parser.parse_args()
 
 solution_method = args.solution_method
@@ -165,7 +166,7 @@ dt.assign(args.cfl_fraction * δx / umax)
 
 
 # And the timestepping loop.
-final_time = 0.25
+final_time = args.final_time
 num_steps = int(final_time / float(dt))
 iterator = range(num_steps) if not has_tqdm else tqdm.trange(num_steps)
 
