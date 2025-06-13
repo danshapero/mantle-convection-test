@@ -29,6 +29,7 @@ parser.add_argument("--log-filename", default="mantle.log")
 parser.add_argument("--solution-method", choices=["split", "monolithic"])
 parser.add_argument("--num-cells", type=int, default=32)
 parser.add_argument("--temperature-degree", type=int, default=1)
+parser.add_argument("--cfl-fraction", type=float, default=1.0)
 args = parser.parse_args()
 
 solution_method = args.solution_method
@@ -160,7 +161,7 @@ stokes_solver.solve()
 # Pick the timestep based on the cell size and max velocity
 δx = mesh.cell_sizes.dat.data_ro[:].min()
 umax = z.sub(0).dat.data_ro[:].max()
-dt.assign(δx / umax)
+dt.assign(args.cfl_fraction * δx / umax)
 
 
 # And the timestepping loop.
