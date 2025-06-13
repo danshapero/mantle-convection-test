@@ -138,10 +138,9 @@ if args.temperature_basis == "dg":
     dT_dn = inner(grad(T), n)
     dφ_dn = inner(grad(φ), n)
     G_diff_facet_flux = -k * (jump(dT_dn) * jump(φ) + jump(T) * jump(dφ_dn)) * dS
-    G_diff_facet_penalty = k * γ / avg(h) * jump(T) * jump(φ) * dS
-    G_diff_boundary_flux = -k * (dT_dn * φ + T * dφ_dn) * ds
-    G_diff_boundary_penalty = k * γ / h * T * φ * ds
-    G_diff_boundary_forcing = k * T_in * (dφ_dn - γ / h * φ) * ds((3, 4))
+    G_diff_facet_penalty = γ * avg(k) / avg(h) * jump(T) * jump(φ) * dS
+    G_diff_boundary_flux = -k * dφ_dn * (T - T_in) * ds((3, 4))
+    G_diff_boundary_penalty = γ * k / h * (T - T_in) * φ * ds((3, 4))
 
     F_energy += (
         G_conv_facet_flux
@@ -150,7 +149,6 @@ if args.temperature_basis == "dg":
         + G_diff_facet_flux
         + G_diff_facet_penalty
         + G_diff_boundary_flux
-        + G_diff_boundary_forcing
         + G_diff_boundary_penalty
     )
 
