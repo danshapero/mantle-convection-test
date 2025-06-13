@@ -66,17 +66,17 @@ def switch(z):
     return exp(z) / (exp(z) + exp(-z))
 
 Ra = Constant(1e6)
-
-ϵ = Constant(1 / num_cells_x)
 x = firedrake.SpatialCoordinate(mesh)
 
-q = Lx**(7 / 3) / (1 + Lx**4)**(2 / 3) * (Ra / (2 * np.sqrt(π)))**(2/3)
-Q = 2 * sqrt(Lx / (π * q))
-T_u = 0.5 * switch((1 - x[1]) / 2 * sqrt(q / (x[0] + ϵ)))
-T_l = 1 - 0.5 * switch(x[1] / 2 * sqrt(q / (Lx - x[0] + ϵ)))
-T_r = 0.5 + Q / (2 * np.sqrt(π)) * sqrt(q / (x[1] + 1)) * exp(-x[0]**2 * q / (4 * x[1] + 4))
-T_s = 0.5 - Q / (2 * np.sqrt(π)) * sqrt(q / (2 - x[1])) * exp(-(Lx - x[0])**2 * q / (8 - 4 * x[1]))
-T_expr = T_u + T_l + T_r + T_s - Constant(1.5)
+def initial_temperature(x):
+    ϵ = Constant(1 / num_cells_x)
+    q = Lx**(7 / 3) / (1 + Lx**4)**(2 / 3) * (Ra / (2 * np.sqrt(π)))**(2/3)
+    Q = 2 * sqrt(Lx / (π * q))
+    T_u = 0.5 * switch((1 - x[1]) / 2 * sqrt(q / (x[0] + ϵ)))
+    T_l = 1 - 0.5 * switch(x[1] / 2 * sqrt(q / (Lx - x[0] + ϵ)))
+    T_r = 0.5 + Q / (2 * np.sqrt(π)) * sqrt(q / (x[1] + 1)) * exp(-x[0]**2 * q / (4 * x[1] + 4))
+    T_s = 0.5 - Q / (2 * np.sqrt(π)) * sqrt(q / (2 - x[1])) * exp(-(Lx - x[0])**2 * q / (8 - 4 * x[1]))
+    return T_u + T_l + T_r + T_s - Constant(1.5)
 
 
 # Create the momentum and energy conservation equations
@@ -87,13 +87,13 @@ if solution_method == "split":
 
     T = firedrake.Function(temperature_space)
     φ = firedrake.TestFunction(temperature_space)
-    T.interpolate(clamp(T_expr, 0, 1))
+    T.interpolate(clamp(initial_temperature(x), 0, 1))
 elif solution_method == "monolithic":
     z = firedrake.Function(Z)
     u, p, T = firedrake.split(z)
     v, q, φ = firedrake.TestFunctions(Z)
 
-    z.sub(2).interpolate(clamp(T_expr, 0, 1))
+    z.sub(2).interpolate(clamp(initial_temperature(x), 0, 1))
 
 
 μ = Constant(1)
