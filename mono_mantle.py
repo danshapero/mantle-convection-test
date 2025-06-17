@@ -12,8 +12,8 @@ import mantle
 
 # Get command-line options
 parser = argparse.ArgumentParser()
-parser.add_argument("--output-filename", type=str)
-parser.add_argument("--log-filename", type=str)
+parser.add_argument("--output-filename", type=str, default="mono.h5")
+parser.add_argument("--log-filename", type=str, default="mono.log")
 parser.add_argument("--num-cells", type=int, default=32)
 parser.add_argument("--temperature-degree", type=int, default=1)
 parser.add_argument("--cfl-fraction", type=float, default=1.0)
