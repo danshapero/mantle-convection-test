@@ -62,7 +62,8 @@ nullspace = firedrake.MixedVectorSpaceBasis(Z, [Z.sub(0), const_fns, Z.sub(2)])
 params = {
     "solver_parameters": {
         "snes_monitor": ":" + args.log_filename,
-        "ksp_type": "gmres",
+        "snes_linesearch_type": "l2",
+        "ksp_type": "preonly",
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "mumps",
     },
