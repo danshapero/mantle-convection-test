@@ -1,9 +1,4 @@
 import argparse
-try:
-    import tqdm
-    has_tqdm = True
-except ImportError:
-    has_tqdm = False
 import firedrake
 from firedrake import Constant
 from irksome import BackwardEuler, TimeStepper
@@ -13,7 +8,6 @@ import mantle
 # Get command-line options
 parser = argparse.ArgumentParser()
 parser.add_argument("--output-filename", type=str, default="split.h5")
-parser.add_argument("--log-filename", type=str, default="split.log")
 parser.add_argument("--num-cells", type=int, default=32)
 parser.add_argument("--temperature-degree", type=int, default=1)
 parser.add_argument("--cfl-fraction", type=float, default=1.0)
@@ -59,7 +53,7 @@ temperature_bcs = [lower_bc, upper_bc]
 # Make solvers
 params = {
     "solver_parameters": {
-        "snes_monitor": ":" + args.log_filename,
+        "snes_monitor": None,
         "ksp_type": "gmres",
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "mumps",
@@ -86,7 +80,6 @@ temperature_solver = TimeStepper(F_energy, method, t, dt, T, bcs=temperature_bcs
 # The solution loop
 final_time = args.final_time
 num_steps = int(final_time / float(dt))
-iterator = range(num_steps) if not has_tqdm else tqdm.trange(num_steps)
 
 with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     output_file.save_mesh(mesh)
@@ -97,7 +90,7 @@ with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     output_file.save_function(p, name="pressure", idx=0)
 
     try:
-        for step in iterator:
+        for step in range(num_steps):
             temperature_solver.advance()
             stokes_solver.solve()
             u, p = z.subfunctions

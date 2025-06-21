@@ -1,9 +1,4 @@
 import argparse
-try:
-    import tqdm
-    has_tqdm = True
-except ImportError:
-    has_tqdm = False
 import firedrake
 from firedrake import Constant, dx
 from irksome import BackwardEuler, TimeStepper
@@ -13,7 +8,6 @@ import mantle
 # Get command-line options
 parser = argparse.ArgumentParser()
 parser.add_argument("--output-filename", type=str, default="mono.h5")
-parser.add_argument("--log-filename", type=str, default="mono.log")
 parser.add_argument("--num-cells", type=int, default=32)
 parser.add_argument("--temperature-degree", type=int, default=1)
 parser.add_argument("--cfl-fraction", type=float, default=1.0)
@@ -61,7 +55,8 @@ const_fns = firedrake.VectorSpaceBasis(constant=True, comm=firedrake.COMM_WORLD)
 nullspace = firedrake.MixedVectorSpaceBasis(Z, [Z.sub(0), const_fns, Z.sub(2)])
 params = {
     "solver_parameters": {
-        "snes_monitor": ":" + args.log_filename,
+        "snes_monitor": None,
+        "snes_linesearch_monitor": None,
         "snes_linesearch_type": "l2",
         "ksp_type": "preonly",
         "pc_type": "lu",
@@ -85,13 +80,13 @@ umax = z.sub(0).dat.data_ro[:].max()
 dt.assign(args.cfl_fraction * δx / umax)
 
 F = F_momentum + F_energy
-solver = TimeStepper(F, method, t, dt, z, bcs=bcs, **params, nullspace=[(1, const_fns)])
+solver = TimeStepper(
+    F, method, t, dt, z, bcs=bcs, **params, nullspace=[(1, const_fns)]
+)
 
 # The solution loop
 final_time = args.final_time
 num_steps = int(final_time / float(dt))
-iterator = range(num_steps) if not has_tqdm else tqdm.trange(num_steps)
-
 with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     output_file.save_mesh(mesh)
 
@@ -101,7 +96,7 @@ with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     output_file.save_function(p, name="pressure", idx=0)
 
     try:
-        for step in iterator:
+        for step in range(num_steps):
             solver.advance()
             u, p, T = z.subfunctions
 
@@ -111,5 +106,6 @@ with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     except firedrake.ConvergenceError as error:
         output_file.h5pyfile.attrs["num_steps"] = step
         print(error)
+        print(f"Failed at step #{step}/{num_steps}")
     else:
         output_file.h5pyfile.attrs["num_steps"] = num_steps
