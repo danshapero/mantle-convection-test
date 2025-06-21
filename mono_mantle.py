@@ -6,7 +6,7 @@ except ImportError:
     has_tqdm = False
 import firedrake
 from firedrake import Constant, dx
-from irksome import BackwardEuler, TimeStepper
+from irksome import BackwardEuler, RadauIIA, TimeStepper
 import mantle
 
 
@@ -59,7 +59,7 @@ bcs = [velocity_bc, lower_bc, upper_bc]
 # Make solvers
 const_fns = firedrake.VectorSpaceBasis(constant=True, comm=firedrake.COMM_WORLD)
 nullspace = firedrake.MixedVectorSpaceBasis(Z, [Z.sub(0), const_fns, Z.sub(2)])
-params = {
+initial_params = {
     "solver_parameters": {
         "snes_monitor": ":" + args.log_filename,
         "snes_linesearch_type": "l2",
@@ -73,19 +73,40 @@ F_temp_init = (T - T_in) * φ * dx
 F_initial = F_momentum + F_temp_init
 stokes_problem = firedrake.NonlinearVariationalProblem(F_initial, z, velocity_bc)
 stokes_solver = firedrake.NonlinearVariationalSolver(
-    stokes_problem, **params, nullspace=nullspace
+    stokes_problem, **initial_params, nullspace=nullspace
 )
 stokes_solver.solve()
 
-method = BackwardEuler()
+method = RadauIIA(2)
 t = Constant(0.0)
 dt = Constant(1e3)
 δx = mesh.cell_sizes.dat.data_ro[:].min()
 umax = z.sub(0).dat.data_ro[:].max()
 dt.assign(args.cfl_fraction * δx / umax)
 
+params = {
+    "solver_parameters": {
+        "snes_monitor": ":" + args.log_filename,
+        "snes_linesearch_type": "l2",
+        "snes_linesearch_max_it": 10,
+        "ksp_type": "fgmres",
+        "pc_type": "fieldsplit",
+        "pc_fieldsplit_type": "multiplicative",
+        "pc_fieldsplit_0_fields": "2,5",
+        "pc_fieldsplit_1_fields": "0,1,3,4",
+        "fieldsplit": {
+            "ksp_type": "preonly",
+            "pc_type": "lu",
+            "pc_factor_mat_solver_type": "mumps",
+        },
+    },
+    "nullspace": [(1, const_fns)],
+    "bcs": bcs,
+}
+
+
 F = F_momentum + F_energy
-solver = TimeStepper(F, method, t, dt, z, bcs=bcs, **params, nullspace=[(1, const_fns)])
+solver = TimeStepper(F, method, t, dt, z, **params)
 
 # The solution loop
 final_time = args.final_time
