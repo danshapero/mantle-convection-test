@@ -1,0 +1,40 @@
+name: 'Test mantle convection problem'
+on: [push, pull_request]
+jobs:
+  test-old:
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/firedrakeproject/firedrake-vanilla:2025-01
+      options: --user root
+    steps:
+      - name: Activate Firedrake virtual environment
+        run: |
+          . /home/firedrake/firedrake/bin/activate
+          echo PATH=$PATH >> $GITHUB_ENV
+      - name: Install Irksome
+        run: |
+          git clone https://github.com/firedrakeproject/Irksome.git
+          pip install ./Irksome
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run test case with operator splitting
+        run: python3 split_mantle.py
+      - name: Run test case with monolithic solver
+        run: python3 mono_mantle.py
+
+  test-new:
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/firedrakeproject/firedrake-vanilla-default:2025.4.1
+      options: --user root
+    steps:
+      - name: Install Irksome
+        run: |
+          git clone https://github.com/firedrakeproject/Irksome.git
+          pip install ./Irksome
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run test case with operator splitting
+        run: python3 split_mantle.py
+      - name: Run test case with monolithic solver
+        run: python3 mono_mantle.py
