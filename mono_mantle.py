@@ -1,7 +1,8 @@
 import argparse
 import firedrake
 from firedrake import Constant, dx
-from irksome import BackwardEuler, TimeStepper
+from irksome import BackwardEuler, TimeStepper, getForm
+from irksome.tools import get_stage_space, getNullspace
 import mantle
 
 
@@ -80,9 +81,14 @@ umax = z.sub(0).dat.data_ro[:].max()
 dt.assign(args.cfl_fraction * δx / umax)
 
 F = F_momentum + F_energy
-solver = TimeStepper(
-    F, method, t, dt, z, bcs=bcs, **params, nullspace=[(1, const_fns)]
-)
+
+W = get_stage_space(Z, method.num_stages)
+w = firedrake.Function(W)
+G, gbc = getForm(F, method, t, dt, z, w, bcs=bcs)
+gnullspace = getNullspace(Z, W, method.num_stages, [(1, const_fns)])
+
+problem = firedrake.NonlinearVariationalProblem(G, w, bcs=gbc)
+solver = firedrake.NonlinearVariationalSolver(problem, **params, nullspace=gnullspace)
 
 # The solution loop
 final_time = args.final_time
@@ -95,9 +101,18 @@ with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     output_file.save_function(u, name="velocity", idx=0)
     output_file.save_function(p, name="pressure", idx=0)
 
+    num_fields = len(Z)
+
     try:
         for step in range(num_steps):
-            solver.advance()
+            solver.solve()
+
+            for stage_index in range(method.num_stages):
+                for field_index in range(num_fields):
+                    stage = w.dat.data_ro[num_fields * stage_index + field_index][:]
+                    coeff = method.b[stage_index]
+                    z.dat.data[field_index][:] += float(dt) * coeff * stage
+
             u, p, T = z.subfunctions
 
             output_file.save_function(T, name="temperature", idx=step + 1)
