@@ -1,4 +1,5 @@
 import argparse
+from petsc4py import PETSc
 import firedrake
 from firedrake import Constant, dx
 from irksome import BackwardEuler, TimeStepper, getForm
@@ -87,8 +88,23 @@ w = firedrake.Function(W)
 G, gbc = getForm(F, method, t, dt, z, w, bcs=bcs)
 gnullspace = getNullspace(Z, W, method.num_stages, [(1, const_fns)])
 
+
+r = firedrake.Cofunction(W.dual())
+def callback(X, F):
+    with r.dat.vec_wo as v:
+        F.copy(v)
+
+    error_norms = []
+    for r_i in r.subfunctions:
+        with r_i.dat.vec_ro as R_i:
+            error_norms.append(R_i.norm())
+
+    PETSc.Sys.Print(f"    > {error_norms}", comm=firedrake.COMM_WORLD)
+
 problem = firedrake.NonlinearVariationalProblem(G, w, bcs=gbc)
-solver = firedrake.NonlinearVariationalSolver(problem, **params, nullspace=gnullspace)
+solver = firedrake.NonlinearVariationalSolver(
+    problem, **params, nullspace=gnullspace, post_function_callback=callback
+)
 
 # The solution loop
 final_time = args.final_time
