@@ -4,15 +4,21 @@ from firedrake import Constant
 from irksome import BackwardEuler, TimeStepper
 import mantle
 
+Print = firedrake.PETSc.Sys.Print
 
 # Get command-line options
 parser = argparse.ArgumentParser()
-parser.add_argument("--output-filename", type=str, default="split.h5")
+parser.add_argument("--output-filename", type=str, default="output/split.h5")
 parser.add_argument("--num-cells", type=int, default=32)
 parser.add_argument("--temperature-degree", type=int, default=1)
 parser.add_argument("--cfl-fraction", type=float, default=1.0)
 parser.add_argument("--final-time", type=float, default=0.25)
-args = parser.parse_args()
+parser.add_argument("--show-args", action="store_true")
+parser.add_argument("--progress", action="store_true")
+args = parser.parse_known_args()[0]
+
+if args.show_args:
+    Print(args)
 
 # Make the mesh and some function spaces
 lx, ly = 2.0, 1.0
@@ -41,6 +47,8 @@ v, q = firedrake.TestFunctions(Z)
 F_momentum = mantle.form_momentum_eqn(u, p, T, v, q, **mantle.default_parameters)
 F_energy = mantle.form_energy_eqn(T, u, φ, **mantle.default_parameters)
 
+u, p = z.subfunctions
+
 # Make some boundary conditions
 velocity_bc = firedrake.DirichletBC(Z.sub(0), Constant((0, 0)), "on_boundary")
 
@@ -53,11 +61,13 @@ temperature_bcs = [lower_bc, upper_bc]
 # Make solvers
 params = {
     "solver_parameters": {
-        "snes_monitor": None,
-        "ksp_type": "gmres",
+        "ksp_type": "preonly",
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "mumps",
+        "pc_factor_shift_type": "nonzero",
+        "ksp_reuse_preconditioner": None,
     },
+    "options_prefix": "stokes",
 }
 
 stokes_problem = firedrake.NonlinearVariationalProblem(F_momentum, z, velocity_bc)
@@ -71,35 +81,60 @@ stokes_solver.solve()
 method = BackwardEuler()
 t = Constant(0.0)
 dt = Constant(1e3)
-δx = mesh.cell_sizes.dat.data_ro[:].min()
-umax = z.sub(0).dat.data_ro[:].max()
+
+speed = firedrake.interpolate(firedrake.sqrt(firedrake.dot(u, u)), u.sub(0).function_space())
+
+with mesh.cell_sizes.dat.vec_ro as vec:
+    δx = vec.min()[1]
+with firedrake.assemble(speed).dat.vec_ro as vec:
+    Print(f"{vec.max()[1]= :.2e} . {vec.mean()= :.2e}")
+    umax = vec.max()[1]
 dt.assign(args.cfl_fraction * δx / umax)
 
-temperature_solver = TimeStepper(F_energy, method, t, dt, T, bcs=temperature_bcs)
+temp_params = {
+    "ksp_type": "preonly",
+    "pc_type": "lu",
+    "pc_factor_mat_solver_type": "mumps",
+}
+
+temperature_solver = TimeStepper(
+    F_energy, method, t, dt, T, bcs=temperature_bcs,
+    solver_parameters=temp_params, options_prefix="temp")
 
 # The solution loop
 final_time = args.final_time
 num_steps = int(final_time / float(dt))
 
+nranks = mesh.comm.size
+Print(f"{Z.dim()= :>6d} . {Z.dim()/nranks= :>6.0f}")
+Print(f"{umax= :.2e} . nt= {num_steps:>4d} . tend= {final_time:.2e} . dt= {float(dt):.2e}")
+Print()
+
 with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     output_file.save_mesh(mesh)
 
-    u, p = z.subfunctions
     output_file.save_function(T, name="temperature", idx=0)
     output_file.save_function(u, name="velocity", idx=0)
     output_file.save_function(p, name="pressure", idx=0)
 
     try:
-        for step in range(num_steps):
+        steps_iter = range(num_steps)
+        if args.progress:
+            firedrake.ProgressBar.width = 20
+            steps_iter = firedrake.ProgressBar().iter(steps_iter)
+
+        for step in steps_iter:
+            if not args.progress:
+                Print(f"\n=== Timestep {step:>4d}/{num_steps} ===")
+
             temperature_solver.advance()
             stokes_solver.solve()
-            u, p = z.subfunctions
+
+            with firedrake.assemble(speed).dat.vec_ro as vec:
+                Print(f"{vec.max()[1]= :.2e} . {vec.mean()= :.2e}")
 
             output_file.save_function(T, name="temperature", idx=step + 1)
             output_file.save_function(u, name="velocity", idx=step + 1)
             output_file.save_function(p, name="pressure", idx=step + 1)
-    except firedrake.ConvergenceError as error:
-        output_file.h5pyfile.attrs["num_steps"] = step
-        print(error)
-    else:
+    finally:
         output_file.h5pyfile.attrs["num_steps"] = num_steps

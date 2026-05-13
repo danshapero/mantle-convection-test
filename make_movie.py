@@ -9,12 +9,15 @@ from matplotlib.animation import FuncAnimation
 from petsc4py import PETSc
 import firedrake
 
+Print = firedrake.PETSc.Sys.Print
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--input-filename")
 parser.add_argument("--output-filename")
 parser.add_argument("--framerate", type=int, default=30)
 args = parser.parse_args()
 
+Print("Loading states from checkpoint.")
 with firedrake.CheckpointFile(args.input_filename, "r") as input_file:
     mesh = input_file.load_mesh()
     num_steps = input_file.h5pyfile.attrs["num_steps"]
@@ -35,6 +38,7 @@ colors = firedrake.tripcolor(Ts[0], axes=ax, num_sample_points=4, **kw)
 def animate(T):
     colors.set_array(fn_plotter(T))
 
+Print("Writing mp4 file.")
 iterator = Ts if not has_tqdm else tqdm.tqdm(Ts)
 animation = FuncAnimation(fig, animate, iterator, interval=1e3 / args.framerate)
 animation.save(args.output_filename)

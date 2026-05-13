@@ -6,14 +6,17 @@ from irksome import BackwardEuler, TimeStepper, getForm
 from irksome.tools import get_stage_space, getNullspace
 import mantle
 
+Print = firedrake.PETSc.Sys.Print
 
 # Get command-line options
 parser = argparse.ArgumentParser()
-parser.add_argument("--output-filename", type=str, default="mono.h5")
+parser.add_argument("--output-filename", type=str, default="output/mono.h5")
 parser.add_argument("--num-cells", type=int, default=32)
 parser.add_argument("--temperature-degree", type=int, default=1)
 parser.add_argument("--cfl-fraction", type=float, default=1.0)
 parser.add_argument("--final-time", type=float, default=0.25)
+parser.add_argument("--show-args", action="store_true")
+parser.add_argument("--progress", action="store_true")
 args = parser.parse_args()
 
 # Make the mesh and some function spaces
@@ -55,30 +58,38 @@ bcs = [velocity_bc, lower_bc, upper_bc]
 # Make solvers
 const_fns = firedrake.VectorSpaceBasis(constant=True, comm=firedrake.COMM_WORLD)
 nullspace = firedrake.MixedVectorSpaceBasis(Z, [Z.sub(0), const_fns, Z.sub(2)])
-params = {
-    "solver_parameters": {
-        "snes_monitor": None,
-        "snes_linesearch_monitor": None,
-        "snes_linesearch_type": "l2",
-        "ksp_type": "preonly",
-        "pc_type": "lu",
-        "pc_factor_mat_solver_type": "mumps",
-    },
+stokes_parameters = {
+    "snes_monitor": None,
+    "snes_type": "ksponly",
+    "ksp_type": "preonly",
+    "pc_type": "lu",
+    "pc_factor_mat_solver_type": "mumps",
+    "pc_factor_shift_type": "nonzero",
 }
 
 F_temp_init = (T - T_in) * φ * dx
 F_initial = F_momentum + F_temp_init
 stokes_problem = firedrake.NonlinearVariationalProblem(F_initial, z, velocity_bc)
 stokes_solver = firedrake.NonlinearVariationalSolver(
-    stokes_problem, **params, nullspace=nullspace
+    stokes_problem, nullspace=nullspace,
+    solver_parameters=stokes_parameters,
+    options_prefix="stokes",
 )
 stokes_solver.solve()
+
+u, p, T = z.subfunctions
 
 method = BackwardEuler()
 t = Constant(0.0)
 dt = Constant(1e3)
-δx = mesh.cell_sizes.dat.data_ro[:].min()
-umax = z.sub(0).dat.data_ro[:].max()
+
+speed = firedrake.interpolate(firedrake.sqrt(firedrake.dot(u, u)), u.sub(0).function_space())
+
+with mesh.cell_sizes.dat.vec_ro as vec:
+    δx = vec.min()[1]
+with firedrake.assemble(speed).dat.vec_ro as vec:
+    Print(f"{vec.max()[1]= :.2e} . {vec.mean()= :.2e}")
+    umax = vec.max()[1]
 dt.assign(args.cfl_fraction * δx / umax)
 
 F = F_momentum + F_energy
@@ -99,20 +110,37 @@ def callback(X, F):
         with r_i.dat.vec_ro as R_i:
             error_norms.append(R_i.norm())
 
-    PETSc.Sys.Print(f"    > {error_norms}", comm=firedrake.COMM_WORLD)
+    PETSc.Sys.Print(f"    > Component norms: |u|={error_norms[0]:.6e} . |p|={error_norms[1]:.6e} . |T|={error_norms[2]:.6e}")
+
+mono_params = {
+    "snes_type": "newtonls",
+    "ksp_type": "preonly",
+    "pc_type": "lu",
+    "pc_factor_mat_solver_type": "mumps",
+    "pc_factor_shift_type": "nonzero",
+
+    "snes_type": "python",
+    "snes_python_type": "firedrake.FieldsplitSNES",
+}
 
 problem = firedrake.NonlinearVariationalProblem(G, w, bcs=gbc)
 solver = firedrake.NonlinearVariationalSolver(
-    problem, **params, nullspace=gnullspace, post_function_callback=callback
+    problem, **params, nullspace=gnullspace, options_prefix="",
+    post_function_callback=callback
 )
 
 # The solution loop
 final_time = args.final_time
 num_steps = int(final_time / float(dt))
+
+nranks = mesh.comm.size
+Print(f"{Z.dim()= :>6d} . {Z.dim()/nranks= :>6.0f}")
+Print(f"{umax= :.2e} . nt= {num_steps:>4d} . tend= {final_time:.2e} . dt= {float(dt):.2e}")
+Print()
+
 with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     output_file.save_mesh(mesh)
 
-    u, p, T = z.subfunctions
     output_file.save_function(T, name="temperature", idx=0)
     output_file.save_function(u, name="velocity", idx=0)
     output_file.save_function(p, name="pressure", idx=0)
@@ -120,7 +148,15 @@ with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     num_fields = len(Z)
 
     try:
-        for step in range(num_steps):
+        steps_iter = range(num_steps)
+        if args.progress:
+            firedrake.ProgressBar.width = 20
+            steps_iter = firedrake.ProgressBar().iter(steps_iter)
+
+        for step in steps_iter:
+            if not args.progress:
+                Print(f"\n=== Timestep {step:>4d}/{num_steps} ===")
+
             solver.solve()
 
             for stage_index in range(method.num_stages):
@@ -129,14 +165,14 @@ with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
                     coeff = method.b[stage_index]
                     z.dat.data[field_index][:] += float(dt) * coeff * stage
 
-            u, p, T = z.subfunctions
+            with firedrake.assemble(speed).dat.vec_ro as vec:
+                Print(f"{vec.max()[1]= :.2e} . {vec.mean()= :.2e}")
 
             output_file.save_function(T, name="temperature", idx=step + 1)
             output_file.save_function(u, name="velocity", idx=step + 1)
             output_file.save_function(p, name="pressure", idx=step + 1)
     except firedrake.ConvergenceError as error:
-        output_file.h5pyfile.attrs["num_steps"] = step
         print(error)
         print(f"Failed at step #{step}/{num_steps}")
-    else:
-        output_file.h5pyfile.attrs["num_steps"] = num_steps
+    finally:
+        output_file.h5pyfile.attrs["num_steps"] = step + 1
