@@ -1,7 +1,6 @@
 import argparse
-from petsc4py import PETSc
 import firedrake
-from firedrake import Constant, dx
+from firedrake import Constant, dx, PETSc
 from irksome import BackwardEuler, TimeStepper, getForm
 from irksome.tools import get_stage_space, getNullspace
 import mantle
@@ -15,9 +14,13 @@ parser.add_argument("--num-cells", type=int, default=32)
 parser.add_argument("--temperature-degree", type=int, default=1)
 parser.add_argument("--cfl-fraction", type=float, default=1.0)
 parser.add_argument("--final-time", type=float, default=0.25)
+parser.add_argument("--solver_type", type=str, default="nls")
 parser.add_argument("--show-args", action="store_true")
 parser.add_argument("--progress", action="store_true")
-args = parser.parse_args()
+args = parser.parse_known_args()[0]
+
+if args.show_args:
+    Print(args)
 
 # Make the mesh and some function spaces
 lx, ly = 2.0, 1.0
@@ -58,13 +61,18 @@ bcs = [velocity_bc, lower_bc, upper_bc]
 # Make solvers
 const_fns = firedrake.VectorSpaceBasis(constant=True, comm=firedrake.COMM_WORLD)
 nullspace = firedrake.MixedVectorSpaceBasis(Z, [Z.sub(0), const_fns, Z.sub(2)])
+
+lu_params = {
+    "pc_type": "lu",
+    "pc_factor_mat_solver_type": "mumps",
+    "pc_factor_shift_type": "nonzero",
+}
+
 stokes_parameters = {
     "snes_monitor": None,
     "snes_type": "ksponly",
     "ksp_type": "preonly",
-    "pc_type": "lu",
-    "pc_factor_mat_solver_type": "mumps",
-    "pc_factor_shift_type": "nonzero",
+    **lu_params,
 }
 
 F_temp_init = (T - T_in) * φ * dx
@@ -101,7 +109,9 @@ gnullspace = getNullspace(Z, W, method.num_stages, [(1, const_fns)])
 
 
 r = firedrake.Cofunction(W.dual())
+sidx = 0
 def callback(X, F):
+    global sidx
     with r.dat.vec_wo as v:
         F.copy(v)
 
@@ -110,23 +120,64 @@ def callback(X, F):
         with r_i.dat.vec_ro as R_i:
             error_norms.append(R_i.norm())
 
-    PETSc.Sys.Print(f"    > Component norms: |u|={error_norms[0]:.6e} . |p|={error_norms[1]:.6e} . |T|={error_norms[2]:.6e}")
+    # PETSc.Sys.Print(f"{sidx:>3d} SNES Function norms: |F|={F.norm():.6e} . |u|={error_norms[0]:.6e} . |p|={error_norms[1]:.6e} . |T|={error_norms[2]:.6e}")
+    sidx += 1
 
-mono_params = {
+nls_params = {
     "snes_type": "newtonls",
     "ksp_type": "preonly",
-    "pc_type": "lu",
-    "pc_factor_mat_solver_type": "mumps",
-    "pc_factor_shift_type": "nonzero",
+    **lu_params
+}
 
+fs_params = {
     "snes_type": "python",
     "snes_python_type": "firedrake.FieldsplitSNES",
+    "snes_fieldsplit_type": "multiplicative",
+    "snes_fieldsplit_0_fields": "2",    # temperature first
+    "snes_fieldsplit_1_fields": "0,1",  # then stokes
+    "fieldsplit_0": {  # stokes Jacobian is constant in time
+        "snes_monitor": ":logs/temp_snes_monitor.log",
+        "snes_type": "ksponly",
+        "ksp_type": "preonly",
+        **lu_params,
+        "ksp_reuse_preconditioner": None,
+    },
+    "fieldsplit_1": {  # need to refactor at each solve
+        "snes_monitor": ":logs/stokes_snes_monitor.log",
+        "snes_type": "ksponly",
+        "ksp_type": "preonly",
+        **lu_params,
+    },
+}
+
+npc_params = {
+    "snes_type": "ngmres",  # just pips anderson?
+    "snes_linesearch_type": "basic",  # maybe secant with nrichardson?
+    "npc_type": "python",
+    "npc_snes_linesearch_type": "basic",  # only linesearch on the outside
+    "npc": fs_params,  # npc is one snes iteration by default
+}
+
+subparams = {
+    'nls': nls_params,
+    'fs': fs_params,
+    'npc': npc_params,
+}
+
+mono_params = {
+    "snes_view": ":logs/mono_snes_view.log",
+    "snes_converged_reason": None,
+    "snes_rtol": 1e-8,
+    "snes_stol": 0,
+    **subparams[args.solver_type],
 }
 
 problem = firedrake.NonlinearVariationalProblem(G, w, bcs=gbc)
 solver = firedrake.NonlinearVariationalSolver(
-    problem, **params, nullspace=gnullspace, options_prefix="",
-    post_function_callback=callback
+    problem, nullspace=gnullspace,
+    solver_parameters=mono_params,
+    options_prefix="",
+    post_function_callback=callback,
 )
 
 # The solution loop
@@ -155,8 +206,9 @@ with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
 
         for step in steps_iter:
             if not args.progress:
-                Print(f"\n=== Timestep {step:>4d}/{num_steps} ===")
+                Print(f"\n=== Timestep {step:>4d}/{num_steps} at Time {step*float(dt):.2e}/{num_steps*float(dt):.2e} ===")
 
+            sidx -= sidx
             solver.solve()
 
             for stage_index in range(method.num_stages):
