@@ -16,6 +16,7 @@ parser.add_argument("--num-cells", type=int, default=32)
 parser.add_argument("--temperature-degree", type=int, default=1)
 parser.add_argument("--cfl-fraction", type=float, default=1.0)
 parser.add_argument("--final-time", type=float, default=0.25)
+parser.add_argument("--strain-heating", action="store_true")
 args = parser.parse_args()
 
 # Make the mesh and some function spaces
@@ -24,7 +25,7 @@ num_cells = args.num_cells
 num_cells_x = int(lx / ly) * num_cells
 mesh = firedrake.RectangleMesh(num_cells_x, num_cells, lx, ly, diagonal="crossed")
 
-# Make osme function spaces
+# Make some function spaces
 pressure_space = firedrake.FunctionSpace(mesh, "CG", 1)
 velocity_space = firedrake.VectorFunctionSpace(mesh, "CG", 2)
 temperature_space = firedrake.FunctionSpace(mesh, "CG", args.temperature_degree)
@@ -43,7 +44,8 @@ u, p, T = firedrake.split(z)
 v, q, φ = firedrake.TestFunctions(Z)
 
 F_momentum = mantle.form_momentum_eqn(u, p, T, v, q, **mantle.default_parameters)
-F_energy = mantle.form_energy_eqn(T, u, φ, **mantle.default_parameters)
+kw = {} if args.strain_heating else {"viscosity": 0.0}
+F_energy = mantle.form_energy_eqn(T, u, φ, **(mantle.default_parameters | kw))
 
 # Make some boundary conditions
 velocity_bc = firedrake.DirichletBC(Z.sub(0), Constant((0, 0)), "on_boundary")
@@ -61,7 +63,9 @@ params = {
     "solver_parameters": {
         "snes_monitor": None,
         "snes_linesearch_monitor": None,
-        "snes_linesearch_type": "secant",
+        "snes_linesearch_type": "bt",
+        "snes_linesearch_max_it": 40,
+        "snes_max_it": 200,
         "ksp_type": "preonly",
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "mumps",

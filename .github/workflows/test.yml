@@ -17,3 +17,7 @@ jobs:
         run: python3 split_mantle.py
       - name: Run test case with monolithic solver
         run: python3 mono_mantle.py
+      - name: Run test case with strain heating + operator splitting
+        run: python3 split_mantle.py --strain-heating
+      - name: Run test case with strain heating + monolithic solver
+        run: python3 mono_mantle.py --strain-heating

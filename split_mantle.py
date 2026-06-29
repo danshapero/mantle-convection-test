@@ -11,6 +11,7 @@ parser.add_argument("--output-filename", type=str, default="split.h5")
 parser.add_argument("--num-cells", type=int, default=32)
 parser.add_argument("--temperature-degree", type=int, default=1)
 parser.add_argument("--cfl-fraction", type=float, default=1.0)
+parser.add_argument("--strain-heating", action="store_true")
 parser.add_argument("--final-time", type=float, default=0.25)
 args = parser.parse_args()
 
@@ -39,7 +40,8 @@ v, q = firedrake.TestFunctions(Z)
 φ = firedrake.TestFunction(temperature_space)
 
 F_momentum = mantle.form_momentum_eqn(u, p, T, v, q, **mantle.default_parameters)
-F_energy = mantle.form_energy_eqn(T, u, φ, **mantle.default_parameters)
+kw = {} if args.strain_heating else {"viscosity": 0.0}
+F_energy = mantle.form_energy_eqn(T, u, φ, **(mantle.default_parameters | kw))
 
 # Make some boundary conditions
 velocity_bc = firedrake.DirichletBC(Z.sub(0), Constant((0, 0)), "on_boundary")

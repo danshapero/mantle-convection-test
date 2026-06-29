@@ -24,6 +24,10 @@ def switch(z):
     return exp(z) / (exp(z) + exp(-z))
 
 
+def ε(v):
+    return sym(grad(v))
+
+
 def initial_temperature(x, nx, lx, ra):
     Lx, Ra = Constant(lx), Constant(ra)
     δ = Constant(1 / nx)
@@ -39,7 +43,6 @@ def initial_temperature(x, nx, lx, ra):
 def form_momentum_eqn(u, p, T, v, q, **parameters):
     μ = Constant(parameters["viscosity"])
     Ra = Constant(parameters["rayleigh_number"])
-    ε = lambda u: sym(grad(u))
     τ = 2 * μ * ε(u)
     g = Constant((0, -1))
     f = -Ra * T * g
@@ -50,5 +53,9 @@ def form_energy_eqn(T, u, φ, **parameters):
     ρ = Constant(parameters["density"])
     c = Constant(parameters["heat_capacity"])
     k = Constant(parameters["thermal_conductivity"])
-    return (ρ * c * Dt(T) * ϕ - inner(ρ * c * T * u - k * grad(T), grad(φ))) * dx
+    μ = Constant(parameters.get("viscosity", Constant(0.0)))
+    F = (ρ * c * Dt(T) * ϕ - inner(ρ * c * T * u - k * grad(T), grad(φ))) * dx
+    τ = 2 * μ * ε(u)
+    S = inner(τ, ε(u)) * φ * dx
+    return F - S
 
