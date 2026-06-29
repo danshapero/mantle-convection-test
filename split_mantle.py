@@ -101,5 +101,6 @@ with firedrake.CheckpointFile(args.output_filename, "w") as output_file:
     except firedrake.ConvergenceError as error:
         output_file.h5pyfile.attrs["num_steps"] = step
         print(error)
+        raise error
     else:
         output_file.h5pyfile.attrs["num_steps"] = num_steps
