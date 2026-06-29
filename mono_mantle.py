@@ -3,8 +3,10 @@ from petsc4py import PETSc
 import firedrake
 from firedrake import Constant, dx
 from irksome import BackwardEuler, TimeStepper, getForm
-from irksome.tools import get_stage_space, getNullspace
 import mantle
+
+import irksome
+backend = irksome.backend.get_backend("firedrake")
 
 
 # Get command-line options
@@ -59,13 +61,14 @@ params = {
     "solver_parameters": {
         "snes_monitor": None,
         "snes_linesearch_monitor": None,
-        "snes_linesearch_type": "l2",
+        "snes_linesearch_type": "secant",
         "ksp_type": "preonly",
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "mumps",
     },
 }
 
+# Initial momentum solve to get the starting velocity correct
 F_temp_init = (T - T_in) * φ * dx
 F_initial = F_momentum + F_temp_init
 stokes_problem = firedrake.NonlinearVariationalProblem(F_initial, z, velocity_bc)
@@ -74,6 +77,7 @@ stokes_solver = firedrake.NonlinearVariationalSolver(
 )
 stokes_solver.solve()
 
+# Set up the problem with Irksome
 method = BackwardEuler()
 t = Constant(0.0)
 dt = Constant(1e3)
@@ -83,12 +87,13 @@ dt.assign(args.cfl_fraction * δx / umax)
 
 F = F_momentum + F_energy
 
-W = get_stage_space(Z, method.num_stages)
+# Use Irksome's low-level interface to get a `firedrake.Form` object
+W = backend.get_stage_space(Z, method.num_stages)
 w = firedrake.Function(W)
 G, gbc = getForm(F, method, t, dt, z, w, bcs=bcs)
-gnullspace = getNullspace(Z, W, method.num_stages, [(1, const_fns)])
+gnullspace = backend.getNullspace(Z, W, method.num_stages, [(1, const_fns)])
 
-
+# Make a callback so that we can see individual components of the error
 r = firedrake.Cofunction(W.dual())
 def callback(X, F):
     with r.dat.vec_wo as v:
@@ -101,6 +106,7 @@ def callback(X, F):
 
     PETSc.Sys.Print(f"    > {error_norms}", comm=firedrake.COMM_WORLD)
 
+# Set up problem and solver objects with the callback
 problem = firedrake.NonlinearVariationalProblem(G, w, bcs=gbc)
 solver = firedrake.NonlinearVariationalSolver(
     problem, **params, nullspace=gnullspace, post_function_callback=callback
